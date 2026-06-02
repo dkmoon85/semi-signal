@@ -11,9 +11,10 @@ st.title("📉 반도체 고점 신호 판독기")
 st.caption("삼성전자 & SK하이닉스 매도 타이밍 포착")
 st.markdown("---")
 
-# 오늘 날짜 설정
+# 오늘 날짜 및 기간 설정
 today = datetime.datetime.today().strftime('%Y%m%d')
-start_date = (datetime.datetime.today() - datetime.timedelta(days=7)).strftime('%Y%m%d')
+start_date_7 = (datetime.datetime.today() - datetime.timedelta(days=7)).strftime('%Y%m%d')
+start_date_30 = (datetime.datetime.today() - datetime.timedelta(days=30)).strftime('%Y%m%d') # 20거래일 확보용
 
 def crawl_news_count(keyword):
     url = f"https://search.naver.com/search.naver?where=news&query={keyword}&sm=tab_opt&sort=1"
@@ -27,7 +28,7 @@ def crawl_news_count(keyword):
 # 폰에서 누를 버튼
 if st.button("🔄 지금 매도 신호 점검하기", type="primary", use_container_width=True):
     
-    with st.spinner("최신 뉴스 및 수급 데이터 분석 중..."):
+    with st.spinner("최신 뉴스 및 20일간의 주가/수급 분석 중..."):
         trigger_count = 0
         results = []
 
@@ -52,14 +53,40 @@ if st.button("🔄 지금 매도 신호 점검하기", type="primary", use_conta
         else:
             results.append(("✅ 안전", "중국 업체 위협 수준 낮음"))
 
-        # 4. 주가 횡보 (실적 대비)
-        results.append(("ℹ️ 수동 확인", "역대급 실적 뉴스에도 주가가 못 오르고 횡보하는지 확인 필요"))
+        # 4. 주가 횡보 (실적 대비) -> 완전 자동화 업그레이드 완료!
+        earning_flat_alert = False
+        for code, name in [("005930", "삼성전자"), ("000660", "SK하이닉스")]:
+            try:
+                # 최근 20거래일 주가 가져오기
+                df_20 = stock.get_market_ohlcv_by_date(start_date_30, today, code)
+                if len(df_20) >= 15:
+                    high_20 = df_20['고가'].max()
+                    low_20 = df_20['저가'].min()
+                    
+                    # 최고가 대비 최저가의 변동폭 (%)
+                    price_range_pct = ((high_20 - low_20) / high_20) * 100
+                    
+                    # 최근 호실적 뉴스 기사 수 체크
+                    news_count = crawl_news_count(f"{name} 호실적") + crawl_news_count(f"{name} 어닝서프라이즈")
+                    
+                    # 조건: 최근 뉴스 5개 이상 쏟아지는데 주가 변동폭이 3% 이내 횡보 시
+                    if price_range_pct <= 3.0 and news_count >= 5:
+                        earning_flat_alert = True
+                        results.append(("🚨 신호 4 켜짐", f"{name}: 호실적 뉴스 대비 주가가 고점 3% 내에서 횡보 중"))
+                        break
+            except:
+                pass
+        
+        if earning_flat_alert:
+            trigger_count += 1
+        else:
+            results.append(("✅ 안전", "실적 뉴스 대비 주가가 정상 흐름이거나 횡보하지 않음"))
 
         # 5. 외국인 자금 이탈
         foreign_alert = False
         for code in ["005930", "000660"]:
             try:
-                df = stock.get_market_net_purchases_of_equities_by_ticker(start_date, today, "KOSPI")
+                df = stock.get_market_net_purchases_of_equities_by_ticker(start_date_7, today, "KOSPI")
                 if code in df.index and df.loc[code, '외국인합계'] < -100000000000:
                     foreign_alert = True
             except:
@@ -84,19 +111,15 @@ if st.button("🔄 지금 매도 신호 점검하기", type="primary", use_conta
         else:
             results.append(("✅ 안전", "증권사 성장성 긍정 유지 중"))
 
-    # --------------------------------------------------
-    # 결과 화면 시각화 (스마트폰 최적화)
-    # --------------------------------------------------
+    # 결과 화면 시각화
     st.markdown("---")
     st.subheader("📊 최종 판정 결과")
     
-    # 스코어 표시
     if trigger_count >= 3:
         st.error(f"🔥 위험! 총 {trigger_count}개 신호 켜짐: 매도를 적극 검토하세요!")
     else:
         st.success(f"🟢 안전! 총 {trigger_count}개 신호 켜짐: 자산을 계속 보유하세요.")
 
-    # 상세 내역을 접이식 메뉴로 깔끔하게 표시
     st.markdown("### 📋 세부 점검 내역")
     for status, desc in results:
         st.write(f"**[{status}]** {desc}")
