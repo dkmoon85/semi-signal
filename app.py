@@ -112,26 +112,23 @@ if st.button("🔄 지금 매도 신호 점검하기", type="primary", use_conta
             counters['trigger'] += 1
 
         # 5. 외국인 자금 이탈
-        # 주의: investor 파라미터를 안 주면 기본값이 '개인'으로 들어가서 전혀 다른 데이터를 보게 됨.
-        # 반드시 investor="외국인"을 명시해야 하고, 컬럼명도 '외국인합계'가 아니라 '순매수거래대금'.
+        # 주의: get_market_net_purchases_of_equities_by_ticker는 '시장 전체 순매수 상위 N개'만
+        # 반환하는 랭킹용 함수라 특정 종목이 누락되기 쉬움 (게다가 '외국인합계' 컬럼 자체가 없음).
+        # 종목을 직접 지정해서 날짜별 수급을 받는 get_market_trading_value_by_date가 맞는 함수.
         try:
-            df = stock.get_market_net_purchases_of_equities_by_ticker(
-                start_date_7, today, "KOSPI", "외국인"
-            )
             foreign_alert = False
             details = []
             for code, name in [("005930", "삼성전자"), ("000660", "SK하이닉스")]:
-                if code in df.index:
-                    val = df.loc[code, '순매수거래대금']
-                    details.append(f"{name} {val/1e8:.0f}억")
-                    if val < -100_000_000_000:
-                        foreign_alert = True
-                else:
-                    # 외국인 기준 순매수/순매도 상위 종목 리스트에 안 들었다는 뜻.
-                    # 보통 삼성전자/하이닉스는 거래량이 워낙 커서 거의 항상 포함됨 -
-                    # 그래도 안 보이면 일단 '확인불가'로 분류 (안전으로 단정하지 않음).
+                df_t = stock.get_market_trading_value_by_date(start_date_7, today, code)
+                if df_t is None or len(df_t) == 0:
                     details.append(f"{name} 데이터없음")
                     counters['error'] += 1
+                    continue
+                val = df_t['외국인합계'].sum()
+                details.append(f"{name} {val/1e8:.0f}억")
+                if val < -100_000_000_000:
+                    foreign_alert = True
+
             detail_str = ", ".join(details)
             missing = "데이터없음" in detail_str
             if foreign_alert:
@@ -139,13 +136,8 @@ if st.button("🔄 지금 매도 신호 점검하기", type="primary", use_conta
                 results.append(("🚨 신호 켜짐", f"외국인 자금 대규모 이탈 (-1000억 이상) [{detail_str}]"))
             elif missing:
                 results.append(("⚠️ 확인불가", f"일부 종목 데이터 누락, 안전 단정 불가 [{detail_str}]"))
-                with st.expander("🔍 외국인 수급 원본 데이터 확인 (디버그)"):
-                    st.write(f"조회 기간: {start_date_7} ~ {today}")
-                    st.write(f"반환된 행 개수: {len(df)}")
-                    st.write(f"반환된 티커 목록: {list(df.index)}")
-                    st.dataframe(df)
             else:
-                results.append(("✅ 안전", f"외국인 수급 양호 [{detail_str}]"))
+                results.append(("✅ 안전", f"외국인 수급 양호 (7일 누적) [{detail_str}]"))
         except Exception as e:
             counters['error'] += 1
             results.append(("⚠️ 확인불가", f"외국인 수급 조회 실패 ({e})"))
