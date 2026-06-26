@@ -139,6 +139,11 @@ if st.button("🔄 지금 매도 신호 점검하기", type="primary", use_conta
                 results.append(("🚨 신호 켜짐", f"외국인 자금 대규모 이탈 (-1000억 이상) [{detail_str}]"))
             elif missing:
                 results.append(("⚠️ 확인불가", f"일부 종목 데이터 누락, 안전 단정 불가 [{detail_str}]"))
+                with st.expander("🔍 외국인 수급 원본 데이터 확인 (디버그)"):
+                    st.write(f"조회 기간: {start_date_7} ~ {today}")
+                    st.write(f"반환된 행 개수: {len(df)}")
+                    st.write(f"반환된 티커 목록: {list(df.index)}")
+                    st.dataframe(df)
             else:
                 results.append(("✅ 안전", f"외국인 수급 양호 [{detail_str}]"))
         except Exception as e:
