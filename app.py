@@ -179,3 +179,4 @@ if st.button("🔄 지금 매도 신호 점검하기", type="primary", use_conta
     st.markdown("### 📋 세부 점검 내역")
     for status, desc in results:
         st.write(f"**[{status}]** {desc}")
+        
