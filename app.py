@@ -9,6 +9,7 @@ st.set_page_config(page_title="반도체 매도 신호기", page_icon="📉", la
 
 st.title("📉 반도체 고점 신호 판독기 (디버그 버전)")
 st.caption("삼성전자 & SK하이닉스 매도 타이밍 포착 · 실제 검색 건수 / 실패 여부 표시")
+st.info("🏷️ 코드 버전: V4-TRADING-VALUE-BY-DATE (이 문구가 안 보이면 옛 코드가 실행 중인 것)")
 st.markdown("---")
 
 # 오늘 날짜 및 기간 설정
@@ -123,6 +124,12 @@ if st.button("🔄 지금 매도 신호 점검하기", type="primary", use_conta
                 if df_t is None or len(df_t) == 0:
                     details.append(f"{name} 데이터없음")
                     counters['error'] += 1
+                    with st.expander(f"🔍 {name} 외국인 수급 원본 데이터 (디버그)"):
+                        st.write(f"조회 기간: {start_date_7} ~ {today}, 종목: {code}")
+                        st.write(f"반환 타입: {type(df_t)}, 길이: {0 if df_t is None else len(df_t)}")
+                        if df_t is not None:
+                            st.write(f"컬럼: {list(df_t.columns)}")
+                            st.dataframe(df_t)
                     continue
                 val = df_t['외국인합계'].sum()
                 details.append(f"{name} {val/1e8:.0f}억")
