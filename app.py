@@ -10,7 +10,7 @@ st.set_page_config(page_title="반도체 매도 신호기", page_icon="📉", la
 
 st.title("📉 반도체 고점 신호 판독기 (디버그 버전)")
 st.caption("삼성전자 & SK하이닉스 매도 타이밍 포착 · 실제 검색 건수 / 실패 여부 표시")
-st.info("🏷️ 코드 버전: V5-NAVER-FRGN (이 문구가 안 보이면 옛 코드가 실행 중인 것)")
+st.info("🏷️ 코드 버전: V6-PCT-THRESHOLD (이 문구가 안 보이면 옛 코드가 실행 중인 것)")
 st.markdown("---")
 
 # 오늘 날짜 및 기간 설정
@@ -43,7 +43,8 @@ def get_foreign_flow_naver(code, max_days=5):
     네이버 금융 종목별 외국인 수급 페이지(frgn.naver)에서
     최근 거래일들의 '외국인 순매매량(주식수)'을 가져와 합산.
     pykrx의 투자자별 수급 API가 클라우드 환경에서 막혀서 쓰는 대체 경로.
-    추정 금액 = 순매매량 합계 × 최근 종가 (정확한 거래대금이 아니라 근사치).
+    추정 금액 = 그날 순매매량 × 그날 종가의 합 (정확한 거래대금이 아니라 근사치).
+    held_shares = 가장 최근일 기준 외국인 보유주식수 (% 계산용 분모).
     실패 시 None.
     """
     url = f"https://finance.naver.com/item/frgn.naver?code={code}"
@@ -62,7 +63,8 @@ def get_foreign_flow_naver(code, max_days=5):
             return None
 
         total_volume = 0.0
-        last_close = None
+        total_value = 0.0
+        held_shares = None
         count = 0
         for row in table.find_all("tr"):
             tds = row.find_all("td")
@@ -74,19 +76,28 @@ def get_foreign_flow_naver(code, max_days=5):
             try:
                 close_price = float(texts[1].replace(',', ''))
                 foreign_vol = float(texts[-3].replace(',', '').replace('%', ''))
+                held = float(texts[-2].replace(',', ''))
             except (ValueError, IndexError):
                 continue
-            if last_close is None:
-                last_close = close_price
+            if held_shares is None:
+                held_shares = held  # 가장 최근(첫 행) 보유주식수
             total_volume += foreign_vol
+            total_value += foreign_vol * close_price  # 그날 종가로 그날 순매매량을 곱함
             count += 1
             if count >= max_days:
                 break
 
         time.sleep(0.4)
-        if count == 0 or last_close is None:
+        if count == 0 or held_shares is None or held_shares == 0:
             return None
-        return {"volume": total_volume, "est_value": total_volume * last_close, "days": count}
+        pct = (total_volume / held_shares) * 100  # 보유주수 대비 순매매 비율(%)
+        return {
+            "volume": total_volume,
+            "est_value": total_value,
+            "days": count,
+            "held_shares": held_shares,
+            "pct": pct,
+        }
     except Exception:
         time.sleep(0.4)
         return None
@@ -174,7 +185,9 @@ if st.button("🔄 지금 매도 신호 점검하기", type="primary", use_conta
         # pykrx 투자자별 수급 API가 이 클라우드 환경에서 항상 빈 데이터를 반환하는 게 확인되어
         # (get_market_net_purchases_of_equities_by_ticker, get_market_trading_value_by_date 둘 다 실패)
         # 네이버 금융 종목별 수급 페이지를 직접 크롤링하는 방식으로 대체.
-        # ⚠️ 이 추정값은 순매매 "주식수" × 최근 종가로 계산한 근사치이며, 정확한 거래대금이 아님.
+        # 기준: 고정 금액(원화) 대신 '외국인 보유주식수 대비 % 순매도'로 판정.
+        # → 주가가 비싼 종목(SK하이닉스처럼 주당 수백만원)도 왜곡 없이 같은 기준 적용 가능.
+        FOREIGN_OUTFLOW_PCT_THRESHOLD = 1.5  # 5거래일간 보유주식의 1.5% 이상 순매도 시 경고
         foreign_alert = False
         foreign_error = False
         details = []
@@ -198,19 +211,20 @@ if st.button("🔄 지금 매도 신호 점검하기", type="primary", use_conta
                     except Exception as diag_e:
                         st.write(f"진단 요청 자체 실패: {diag_e}")
                 continue
+            pct = info['pct']
             est = info['est_value']
-            details.append(f"{name} 추정 {est/1e8:.0f}억({info['days']}일치)")
-            if est < -100_000_000_000:
+            details.append(f"{name} {pct:+.2f}%(보유주 대비, 추정 {est/1e8:.0f}억, {info['days']}일치)")
+            if pct <= -FOREIGN_OUTFLOW_PCT_THRESHOLD:
                 foreign_alert = True
 
         detail_str = ", ".join(details)
         if foreign_alert:
             counters['trigger'] += 1
-            results.append(("🚨 신호 켜짐", f"외국인 자금 대규모 이탈 추정 (-1000억 이상) [{detail_str}]"))
+            results.append(("🚨 신호 켜짐", f"외국인 보유주 {FOREIGN_OUTFLOW_PCT_THRESHOLD}% 이상 순매도 [{detail_str}]"))
         elif foreign_error:
             results.append(("⚠️ 확인불가", f"네이버 수급 데이터 조회 실패 [{detail_str}]"))
         else:
-            results.append(("✅ 안전", f"외국인 수급 양호, 네이버 기준 추정치 [{detail_str}]"))
+            results.append(("✅ 안전", f"외국인 수급 양호 (기준: -{FOREIGN_OUTFLOW_PCT_THRESHOLD}% 미달) [{detail_str}]"))
 
         # 6. HBM 대체 기술
         check_pair_signal(
