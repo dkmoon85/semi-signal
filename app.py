@@ -1,5 +1,6 @@
 import streamlit as st
 import datetime
+import time
 import requests
 from bs4 import BeautifulSoup
 from pykrx import stock
@@ -9,7 +10,7 @@ st.set_page_config(page_title="반도체 매도 신호기", page_icon="📉", la
 
 st.title("📉 반도체 고점 신호 판독기 (디버그 버전)")
 st.caption("삼성전자 & SK하이닉스 매도 타이밍 포착 · 실제 검색 건수 / 실패 여부 표시")
-st.info("🏷️ 코드 버전: V4-TRADING-VALUE-BY-DATE (이 문구가 안 보이면 옛 코드가 실행 중인 것)")
+st.info("🏷️ 코드 버전: V5-NAVER-FRGN (이 문구가 안 보이면 옛 코드가 실행 중인 것)")
 st.markdown("---")
 
 # 오늘 날짜 및 기간 설정
@@ -29,8 +30,65 @@ def crawl_news_count(keyword):
         response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
-        return len(soup.select('.news_tit'))
+        count = len(soup.select('.news_tit'))
+        time.sleep(0.4)  # 네이버 봇 차단(rate limit) 완화용 지연
+        return count
     except Exception:
+        time.sleep(0.4)
+        return None
+
+
+def get_foreign_flow_naver(code, max_days=5):
+    """
+    네이버 금융 종목별 외국인 수급 페이지(frgn.naver)에서
+    최근 거래일들의 '외국인 순매매량(주식수)'을 가져와 합산.
+    pykrx의 투자자별 수급 API가 클라우드 환경에서 막혀서 쓰는 대체 경로.
+    추정 금액 = 순매매량 합계 × 최근 종가 (정확한 거래대금이 아니라 근사치).
+    실패 시 None.
+    """
+    url = f"https://finance.naver.com/item/frgn.naver?code={code}"
+    try:
+        response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, 'html.parser')
+
+        table = None
+        for t in soup.find_all("table"):
+            if "외국인" in t.get_text():
+                table = t
+                break
+        if table is None:
+            time.sleep(0.4)
+            return None
+
+        total_volume = 0.0
+        last_close = None
+        count = 0
+        for row in table.find_all("tr"):
+            tds = row.find_all("td")
+            if len(tds) < 6:
+                continue
+            texts = [td.get_text(strip=True) for td in tds]
+            if not texts[0]:
+                continue
+            try:
+                close_price = float(texts[1].replace(',', ''))
+                foreign_vol = float(texts[-3].replace(',', '').replace('%', ''))
+            except (ValueError, IndexError):
+                continue
+            if last_close is None:
+                last_close = close_price
+            total_volume += foreign_vol
+            count += 1
+            if count >= max_days:
+                break
+
+        time.sleep(0.4)
+        if count == 0 or last_close is None:
+            return None
+        return {"volume": total_volume, "est_value": total_volume * last_close, "days": count}
+    except Exception:
+        time.sleep(0.4)
         return None
 
 
@@ -113,41 +171,46 @@ if st.button("🔄 지금 매도 신호 점검하기", type="primary", use_conta
             counters['trigger'] += 1
 
         # 5. 외국인 자금 이탈
-        # 주의: get_market_net_purchases_of_equities_by_ticker는 '시장 전체 순매수 상위 N개'만
-        # 반환하는 랭킹용 함수라 특정 종목이 누락되기 쉬움 (게다가 '외국인합계' 컬럼 자체가 없음).
-        # 종목을 직접 지정해서 날짜별 수급을 받는 get_market_trading_value_by_date가 맞는 함수.
-        try:
-            foreign_alert = False
-            details = []
-            for code, name in [("005930", "삼성전자"), ("000660", "SK하이닉스")]:
-                df_t = stock.get_market_trading_value_by_date(start_date_7, today, code)
-                if df_t is None or len(df_t) == 0:
-                    details.append(f"{name} 데이터없음")
-                    counters['error'] += 1
-                    with st.expander(f"🔍 {name} 외국인 수급 원본 데이터 (디버그)"):
-                        st.write(f"조회 기간: {start_date_7} ~ {today}, 종목: {code}")
-                        st.write(f"반환 타입: {type(df_t)}, 길이: {0 if df_t is None else len(df_t)}")
-                        if df_t is not None:
-                            st.write(f"컬럼: {list(df_t.columns)}")
-                            st.dataframe(df_t)
-                    continue
-                val = df_t['외국인합계'].sum()
-                details.append(f"{name} {val/1e8:.0f}억")
-                if val < -100_000_000_000:
-                    foreign_alert = True
+        # pykrx 투자자별 수급 API가 이 클라우드 환경에서 항상 빈 데이터를 반환하는 게 확인되어
+        # (get_market_net_purchases_of_equities_by_ticker, get_market_trading_value_by_date 둘 다 실패)
+        # 네이버 금융 종목별 수급 페이지를 직접 크롤링하는 방식으로 대체.
+        # ⚠️ 이 추정값은 순매매 "주식수" × 최근 종가로 계산한 근사치이며, 정확한 거래대금이 아님.
+        foreign_alert = False
+        foreign_error = False
+        details = []
+        for code, name in [("005930", "삼성전자"), ("000660", "SK하이닉스")]:
+            info = get_foreign_flow_naver(code)
+            if info is None:
+                details.append(f"{name} 조회실패")
+                foreign_error = True
+                counters['error'] += 1
+                with st.expander(f"🔍 {name} 네이버 수급 진단 (디버그)"):
+                    try:
+                        diag_url = f"https://finance.naver.com/item/frgn.naver?code={code}"
+                        diag_res = requests.get(diag_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
+                        diag_soup = BeautifulSoup(diag_res.text, 'html.parser')
+                        n_tables = len(diag_soup.find_all("table"))
+                        has_foreign_text = "외국인" in diag_res.text
+                        st.write(f"HTTP 상태코드: {diag_res.status_code}")
+                        st.write(f"응답 길이: {len(diag_res.text)}자")
+                        st.write(f"테이블 개수: {n_tables}")
+                        st.write(f"'외국인' 텍스트 포함 여부: {has_foreign_text}")
+                    except Exception as diag_e:
+                        st.write(f"진단 요청 자체 실패: {diag_e}")
+                continue
+            est = info['est_value']
+            details.append(f"{name} 추정 {est/1e8:.0f}억({info['days']}일치)")
+            if est < -100_000_000_000:
+                foreign_alert = True
 
-            detail_str = ", ".join(details)
-            missing = "데이터없음" in detail_str
-            if foreign_alert:
-                counters['trigger'] += 1
-                results.append(("🚨 신호 켜짐", f"외국인 자금 대규모 이탈 (-1000억 이상) [{detail_str}]"))
-            elif missing:
-                results.append(("⚠️ 확인불가", f"일부 종목 데이터 누락, 안전 단정 불가 [{detail_str}]"))
-            else:
-                results.append(("✅ 안전", f"외국인 수급 양호 (7일 누적) [{detail_str}]"))
-        except Exception as e:
-            counters['error'] += 1
-            results.append(("⚠️ 확인불가", f"외국인 수급 조회 실패 ({e})"))
+        detail_str = ", ".join(details)
+        if foreign_alert:
+            counters['trigger'] += 1
+            results.append(("🚨 신호 켜짐", f"외국인 자금 대규모 이탈 추정 (-1000억 이상) [{detail_str}]"))
+        elif foreign_error:
+            results.append(("⚠️ 확인불가", f"네이버 수급 데이터 조회 실패 [{detail_str}]"))
+        else:
+            results.append(("✅ 안전", f"외국인 수급 양호, 네이버 기준 추정치 [{detail_str}]"))
 
         # 6. HBM 대체 기술
         check_pair_signal(
@@ -179,4 +242,3 @@ if st.button("🔄 지금 매도 신호 점검하기", type="primary", use_conta
     st.markdown("### 📋 세부 점검 내역")
     for status, desc in results:
         st.write(f"**[{status}]** {desc}")
-        
