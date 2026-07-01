@@ -4,13 +4,26 @@ import time
 import requests
 from bs4 import BeautifulSoup
 from pykrx import stock
+from email.utils import parsedate_to_datetime
 
 # 스마트폰 화면 최적화 설정
 st.set_page_config(page_title="반도체 매도 신호기", page_icon="📉", layout="centered")
 
 st.title("📉 반도체 고점 신호 판독기 (디버그 버전)")
 st.caption("삼성전자 & SK하이닉스 매도 타이밍 포착 · 실제 검색 건수 / 실패 여부 표시")
-st.info("🏷️ 코드 버전: V6-PCT-THRESHOLD (이 문구가 안 보이면 옛 코드가 실행 중인 것)")
+st.info("🏷️ 코드 버전: V7-OPENAPI-NEWS (이 문구가 안 보이면 옛 코드가 실행 중인 것)")
+
+NAVER_CLIENT_ID = st.secrets.get("NAVER_CLIENT_ID", "")
+NAVER_CLIENT_SECRET = st.secrets.get("NAVER_CLIENT_SECRET", "")
+if not NAVER_CLIENT_ID or not NAVER_CLIENT_SECRET:
+    st.error(
+        "⚠️ 네이버 오픈API 키(NAVER_CLIENT_ID / NAVER_CLIENT_SECRET)가 설정되지 않았어요.\n\n"
+        "1) developers.naver.com → Application 등록 → '검색' API 선택 (무료)\n"
+        "2) 발급받은 Client ID/Secret을\n"
+        "   Streamlit Cloud 앱 → Settings → Secrets 에 아래 형식으로 추가\n\n"
+        "```\nNAVER_CLIENT_ID = \"여기에_입력\"\nNAVER_CLIENT_SECRET = \"여기에_입력\"\n```\n\n"
+        "추가 후 앱을 재시작(Reboot)하면 뉴스 신호들이 정상 작동해요."
+    )
 st.markdown("---")
 
 # 오늘 날짜 및 기간 설정
@@ -19,22 +32,70 @@ start_date_7 = (datetime.datetime.today() - datetime.timedelta(days=7)).strftime
 start_date_30 = (datetime.datetime.today() - datetime.timedelta(days=30)).strftime('%Y%m%d')  # 20거래일 확보용
 
 
+RECENT_NEWS_DAYS = 3  # '최근 며칠'을 버즈 발생 기준으로 볼지. 필요시 조정 가능.
+
+
 def crawl_news_count(keyword):
     """
     네이버 뉴스 검색 결과 개수를 반환.
-    실패(네트워크 오류, 차단, 파싱 실패 등) 시에는 0이 아니라 None을 반환해서
-    '진짜 0건'과 '크롤링 실패'를 구분할 수 있게 한다.
+    예전엔 search.naver.com HTML을 직접 긁었는데, 이게 클라우드 IP에서 자주 차단(403/타임아웃)되어
+    공식 '네이버 검색 오픈API'로 교체함. API는 봇 차단 대상이 아니라서 훨씬 안정적임.
+    (단, 무료지만 Client ID/Secret 발급이 필요 - 위 상단 안내 참고)
+
+    API는 '전체 기간 총 매칭 건수(total)'를 주는데, 그걸 그대로 쓰면 키워드가 옛날부터
+    조금이라도 언급된 적 있으면 영구적으로 임계치를 넘어버려서 '최신 동향 포착'이라는
+    원래 의도와 안 맞음. 그래서 최근 N일(RECENT_NEWS_DAYS) 안에 실제로 게재된 기사만
+    pubDate로 골라서 카운트함 → '최근에 갑자기 늘었는가'를 더 정확히 반영.
+
+    실패(인증 오류, 네트워크 오류 등) 시에는 0이 아니라 None을 반환해서
+    '진짜 0건'과 '조회 실패'를 구분할 수 있게 한다.
+    실패 시 원인 진단을 위해 st.session_state['news_crawl_debug']에 마지막 실패 정보를 남긴다.
     """
-    url = f"https://search.naver.com/search.naver?where=news&query={keyword}&sm=tab_opt&sort=1"
+    if not NAVER_CLIENT_ID or not NAVER_CLIENT_SECRET:
+        st.session_state.setdefault('news_crawl_debug', []).append(
+            f"{keyword}: NAVER_CLIENT_ID/SECRET 미설정"
+        )
+        return None
+
+    url = "https://openapi.naver.com/v1/search/news.json"
+    headers = {
+        "X-Naver-Client-Id": NAVER_CLIENT_ID,
+        "X-Naver-Client-Secret": NAVER_CLIENT_SECRET,
+    }
+    params = {"query": keyword, "display": 30, "sort": "date"}
     try:
-        response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
+        response = requests.get(url, headers=headers, params=params, timeout=5)
+        status = response.status_code
         response.raise_for_status()
-        soup = BeautifulSoup(response.text, 'html.parser')
-        count = len(soup.select('.news_tit'))
-        time.sleep(0.4)  # 네이버 봇 차단(rate limit) 완화용 지연
-        return count
-    except Exception:
-        time.sleep(0.4)
+        data = response.json()
+        items = data.get("items", [])
+
+        cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=RECENT_NEWS_DAYS)
+        recent_count = 0
+        for item in items:
+            pub_date_str = item.get("pubDate", "")
+            try:
+                pub_dt = parsedate_to_datetime(pub_date_str)
+                if pub_dt.tzinfo is None:
+                    pub_dt = pub_dt.replace(tzinfo=datetime.timezone.utc)
+            except (TypeError, ValueError):
+                continue
+            if pub_dt >= cutoff:
+                recent_count += 1
+            else:
+                # sort=date라 최신순으로 오므로, 기준일보다 오래된 게 나오면 그 뒤는 더 오래된 것들임
+                break
+
+        time.sleep(0.1)  # 공식 API라 차단 위험은 낮지만 과호출 방지용 최소 지연
+        return recent_count
+    except requests.exceptions.HTTPError:
+        st.session_state.setdefault('news_crawl_debug', []).append(f"{keyword}: HTTP {status}")
+        return None
+    except requests.exceptions.Timeout:
+        st.session_state.setdefault('news_crawl_debug', []).append(f"{keyword}: 타임아웃")
+        return None
+    except Exception as e:
+        st.session_state.setdefault('news_crawl_debug', []).append(f"{keyword}: {type(e).__name__} {e}")
         return None
 
 
@@ -247,6 +308,12 @@ if st.button("🔄 지금 매도 신호 점검하기", type="primary", use_conta
             f"⚠️ {counters['error']}개 항목에서 크롤링/데이터 조회가 실패했습니다. "
             f"이 항목들은 '안전'이 아니라 '확인 불가'이니 판단에서 제외하고 보세요."
         )
+
+    if 'news_crawl_debug' in st.session_state and st.session_state['news_crawl_debug']:
+        with st.expander("🔍 뉴스 크롤링 실패 원인 진단 (디버그)"):
+            for line in st.session_state['news_crawl_debug']:
+                st.write(f"- {line}")
+        st.session_state['news_crawl_debug'] = []
 
     if counters['trigger'] >= 3:
         st.error(f"🔥 위험! 총 {counters['trigger']}개 신호 켜짐: 매도를 적극 검토하세요!")
